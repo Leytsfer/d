@@ -182,39 +182,6 @@ local function openDetail(idx)
     end
   end
 
-  -- ==== ТЕСТ СОВПАДЕНИЯ МАГАЗИНА ====
-  -- Проверяем, какие имена полей драйвер МЭ реально понимает в фильтре/отпечатке.
-  -- Именно от этого зависят наличие на витрине и успех exportItem при покупке.
-  do
-    local name2 = st.name or st.label or st.id
-    local dmg2 = tonumber(st.damage or st.dmg or st.meta or st.metadata or 0) or 0
-    table.insert(detailLines, "")
-    table.insert(detailLines, "=== ТЕСТ СОВПАДЕНИЯ МАГАЗИНА ===")
-    table.insert(detailLines, "Ключ витрины: " .. name2 .. ":" .. tostring(dmg2))
-    table.insert(detailLines, "Фингерпринт покупки: { id = " .. name2 .. ", dmg = " .. tostring(dmg2) .. " }")
-    local function tryFilter(label, filter)
-      local okf, list = pcall(function() return me.getItemsInNetwork(filter) end)
-      if not okf then
-        table.insert(detailLines, label .. " : ошибка драйвера: " .. tostring(list):sub(1, 70))
-        return
-      end
-      local total, withDmg = 0, 0
-      if type(list) == "table" then
-        for _, it in ipairs(list) do
-          total = total + (tonumber(it.size) or 0)
-          if (tonumber(it.damage) or 0) == dmg2 then
-            withDmg = withDmg + (tonumber(it.size) or 0)
-          end
-        end
-      end
-      table.insert(detailLines, label .. " : всего " .. total .. ", из них damage=" .. tostring(dmg2) .. ": " .. withDmg)
-    end
-    tryFilter("{id, dmg}     ", { id = name2, dmg = dmg2 })
-    tryFilter("{id, damage}  ", { id = name2, damage = dmg2 })
-    tryFilter("{id}          ", { id = name2 })
-    tryFilter("{name, damage}", { name = name2, damage = dmg2 })
-  end
-
 -- ===== Навигация =====
 local function moveCursor(delta)
   local list = getDisplayList()
