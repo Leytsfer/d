@@ -155,7 +155,7 @@ local function openDetail(idx)
       table.insert(detailLines, wl)
     end
   end
-  -- Расширенные детали через getItemDetail (драйвер GTNH требует поле 'id', не 'name')
+    -- Расширенные детали через getItemDetail (драйвер GTNH требует поле 'id', не 'name')
   if me.getItemDetail then
     table.insert(detailLines, "")
     table.insert(detailLines, "=== getItemDetail() ===")
