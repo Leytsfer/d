@@ -290,6 +290,34 @@ local function openDetail(idx)
   probe("P6 {id,dmg,nbt=''}        ", { id = name, dmg = dmg, nbt = "" })
   probe("P7 {id,dmg,nbt=empty-b64} ", { id = name, dmg = dmg, nbt = "CgAAAA==" })
 
+    -- ==== ОРАКУЛ, РАУНД 2 ====
+  local function probe2(label, fp)
+    local okd, det = pcall(function() return me.getItemDetail(fp) end)
+    local res
+    if not okd then res = "ошибка: " .. tostring(det):sub(1, 40)
+    elseif not det then res = "nil"
+    else res = "ОБЪЕКТ" end
+    addLine(label .. " : " .. res)
+  end
+
+  -- P8: id + все выставленные наружу поля тега (заряд, чары, tier...)
+  local fp8 = { id = name, dmg = dmg }
+  if st.charge ~= nil then fp8.charge = st.charge end
+  if st.enchantments ~= nil then fp8.enchantments = st.enchantments end
+  if st.tier ~= nil then fp8.tier = st.tier end
+  if st.transferLimit ~= nil then fp8.transferLimit = st.transferLimit end
+  if st.canProvideEnergy ~= nil then fp8.canProvideEnergy = st.canProvideEnergy end
+  probe2("P8 {id,dmg,+поля тега} ", fp8)
+
+  -- P9: полный round-trip НО с добавленным id (чинит причину ошибки P2/P3)
+  local fp9 = {}
+  for k, v in pairs(st) do fp9[k] = v end
+  fp9.id = name
+  probe2("P9 round-trip + id    ", fp9)
+
+  -- P10: проверяем, не отравляет ли матчинг поле label
+  probe2("P10 {id,dmg,label}    ", { id = name, dmg = dmg, label = st.label })
+
 
   detailPage = 1
   view = "detail"
