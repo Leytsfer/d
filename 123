@@ -1,13 +1,14 @@
 -- ============================================================
--- ME DEBUG SCANNER v1.2
+-- ME DEBUG SCANNER v1.5
 -- Отладчик МЭ: сканирует сеть и выводит ВСЕ данные предметов.
 --
 -- Управление МЫШЬЮ: кнопки на 3-й строке, клик по строке списка,
 -- колесо мыши для листания.
 -- Управление КЛАВИАТУРОЙ: R G Enter Q Esc, стрелки, PgUp/PgDn.
 --
--- v1.2: исправлен getItemDetail (драйвер требует поле 'id'),
---       добавлен блок «ТЕСТ СОВПАДЕНИЯ МАГАЗИНА» и типы ключевых полей.
+-- v1.5: добавлен тест exportItem (E-пробы, предохранитель
+--       EXPORT_TEST_SIDE), блок «NBT-варианты в МЭ» и «ВЕРДИКТ»,
+--       probe() унифицирована и возвращает результат.
 -- ============================================================
 
 local component = require("component")
@@ -25,6 +26,14 @@ if w < mw or h < mh then
 end
 
 -- ============================================================
+-- СТОРОНА ДЛЯ ТЕСТОВОГО ЭКСПОРТА (например "north").
+-- Пусто = тест exportItem ВЫКЛЮЧЕН (безопасно).
+-- Перед включением поставь сундук с этой стороны ME-интерфейса!
+-- Тест ДВИГАЕТ предметы (по 1 шт на пробу).
+-- ============================================================
+local EXPORT_TEST_SIDE = ""
+
+-- ============================================================
 -- АДРЕС ИНТЕРФЕЙСА (пусто = автопоиск первого доступного)
 -- ============================================================
 local ME_INTERFACE_ADDRESS = ""
@@ -36,7 +45,7 @@ if ME_INTERFACE_ADDRESS ~= "" then
     me = component.proxy(ME_INTERFACE_ADDRESS)
   end
 else
-  for addr in component.list("me_interface") do
+    for addr in component.list("me_interface") do
     me = component.proxy(addr)
     break
   end
@@ -98,6 +107,28 @@ local function stackLines(st)
     table.insert(lines, string.format("%s = %s", tostring(k), valStr))
   end
   return lines
+end
+
+-- Подпись стека без количества: для подсчёта NBT-вариантов
+local function stackSignature(st)
+  local keys = {}
+  for k in pairs(st) do keys[#keys + 1] = k end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  local parts = {}
+  for _, k in ipairs(keys) do
+    if k ~= "size" and k ~= "qty" and k ~= "count" then
+      local v = st[k]
+      local vs
+      if type(v) == "table" then
+        local ok, s = pcall(serialization.serialize, v)
+        vs = ok and s or "[tbl]"
+      else
+        vs = tostring(v)
+      end
+      parts[#parts + 1] = tostring(k) .. "=" .. vs
+    end
+  end
+  return table.concat(parts, ", ")
 end
 
 local function getDisplayList()
@@ -227,78 +258,70 @@ local function openDetail(idx)
   sumFilter("{id}         ", { id = name })
   sumFilter("{name, dmg}  ", { name = name, dmg = dmg })
 
-  if me.getItemDetail then
-    local okd, d1 = pcall(function() return me.getItemDetail({ id = name, dmg = dmg }) end)
-    if okd and d1 then
-      local okb, b = pcall(function()
-        if type(d1.basic) == "function" then return d1.basic() end
-        return d1.basic
-      end)
-      if okb and type(b) == "table" then
-        addLine("getItemDetail{id,dmg}.basic: qty=" .. tostring(b.qty or b.size or 0))
-      else
-        addLine("getItemDetail{id,dmg}: ответил, но basic недоступен")
+  -- ==== NBT-ВАРИАНТЫ В МЭ ====
+  addLine("")
+  addLine("=== NBT-ВАРИАНТЫ В МЭ ===")
+  local variants = {}
+  local vorder = {}
+  for _, it in ipairs(rawItems) do
+    local nm = it.name or it.label or it.id or "?"
+    local dd = tonumber(it.damage or it.dmg or it.meta or it.metadata or 0) or 0
+    if nm == name and dd == dmg then
+      local sig = stackSignature(it)
+      if not variants[sig] then
+        variants[sig] = { n = 0, qty = 0 }
+        vorder[#vorder + 1] = sig
       end
-    else
-      addLine("getItemDetail{id,dmg}: ошибка " .. tostring(d1):sub(1, 50))
+      variants[sig].n = variants[sig].n + 1
+      variants[sig].qty = variants[sig].qty + (tonumber(it.size) or 0)
     end
   end
-
-  if st.hasTag == true then
-    addLine("!! ПРЕДМЕТ ИМЕЕТ NBT-ТЕГ (hasTag=true)")
-    addLine("!! Если покупка падает с «Не удалось выдать предмет» —")
-    addLine("!! вероятно, exportItem не матчит стек с тегом по фингерпринту без тега.")
+  addLine("вариантов: " .. #vorder)
+  for i, sig in ipairs(vorder) do
+    addLine("  #" .. i .. " стеков=" .. variants[sig].n .. " qty=" .. variants[sig].qty .. ": " .. sig)
   end
 
-
-  -- ==== ОРАКУЛ v1.4: какой фингерпринт драйвер узнаёт (безопасно, предметы не двигаются) ====
+  -- ==== ОРАКУЛ: какой фингерпринт драйвер узнаёт (безопасно) ====
   addLine("")
   addLine("=== ОРАКУЛ: варианты фингерпринта ===")
-  local function probe(label, fp)
+  local probeResults = {}
+  local function probe(key, label, fp)
     local okd, det = pcall(function() return me.getItemDetail(fp) end)
     local res
-    if not okd then res = "ошибка"
+    if not okd then res = "ошибка: " .. tostring(det):sub(1, 30)
     elseif not det then res = "nil"
     else res = "ОБЪЕКТ" end
     addLine(label .. " : " .. res)
+    probeResults[key] = res
+    return res
   end
 
   -- P1: базовый (как сейчас шлёт магазин)
-  probe("P1 {id,dmg}               ", { id = name, dmg = dmg })
+  probe("P1", "P1 {id,dmg}               ", { id = name, dmg = dmg })
 
-  -- P2: round-trip — полная копия стека из сети
+  -- P2: round-trip — полная копия стека из сети (без id: упадёт с ошибкой)
   local rt = {}
   for k, v in pairs(st) do rt[k] = v end
-  probe("P2 round-trip все поля    ", rt)
+  probe("P2", "P2 round-trip все поля    ", rt)
 
-  -- P3: round-trip без количества
+  -- P3: round-trip без количества (тоже без id)
   local rt2 = {}
   for k, v in pairs(st) do
     if k ~= "size" and k ~= "qty" and k ~= "count" then rt2[k] = v end
   end
-  probe("P3 round-trip без size    ", rt2)
+  probe("P3", "P3 round-trip без size    ", rt2)
 
   -- P4: с зарядом из стека
   if st.charge ~= nil then
-    probe("P4 {id,dmg,charge}        ", { id = name, dmg = dmg, charge = st.charge })
+    probe("P4", "P4 {id,dmg,charge}        ", { id = name, dmg = dmg, charge = st.charge })
   end
 
   -- P5: флаг hasTag
-  probe("P5 {id,dmg,hasTag=true}   ", { id = name, dmg = dmg, hasTag = true })
+  probe("P5", "P5 {id,dmg,hasTag=true}   ", { id = name, dmg = dmg, hasTag = true })
 
   -- P6/P7: кандидаты ключа nbt
-  probe("P6 {id,dmg,nbt=''}        ", { id = name, dmg = dmg, nbt = "" })
-  probe("P7 {id,dmg,nbt=empty-b64} ", { id = name, dmg = dmg, nbt = "CgAAAA==" })
-
-    -- ==== ОРАКУЛ, РАУНД 2 ====
-  local function probe2(label, fp)
-    local okd, det = pcall(function() return me.getItemDetail(fp) end)
-    local res
-    if not okd then res = "ошибка: " .. tostring(det):sub(1, 40)
-    elseif not det then res = "nil"
-    else res = "ОБЪЕКТ" end
-    addLine(label .. " : " .. res)
-  end
+  probe("P6", "P6 {id,dmg,nbt=''}        ", { id = name, dmg = dmg, nbt = "" })
+  probe("P7", "P7 {id,dmg,nbt=empty-b64} ", { id = name, dmg = dmg, nbt = "CgAAAA==" })
 
   -- P8: id + все выставленные наружу поля тега (заряд, чары, tier...)
   local fp8 = { id = name, dmg = dmg }
@@ -307,17 +330,67 @@ local function openDetail(idx)
   if st.tier ~= nil then fp8.tier = st.tier end
   if st.transferLimit ~= nil then fp8.transferLimit = st.transferLimit end
   if st.canProvideEnergy ~= nil then fp8.canProvideEnergy = st.canProvideEnergy end
-  probe2("P8 {id,dmg,+поля тега} ", fp8)
+  probe("P8", "P8 {id,dmg,+поля тега}    ", fp8)
 
-  -- P9: полный round-trip НО с добавленным id (чинит причину ошибки P2/P3)
+  -- P9: полный round-trip НО с добавленным id
   local fp9 = {}
   for k, v in pairs(st) do fp9[k] = v end
   fp9.id = name
-  probe2("P9 round-trip + id    ", fp9)
+  probe("P9", "P9 round-trip + id        ", fp9)
 
-  -- P10: проверяем, не отравляет ли матчинг поле label
-  probe2("P10 {id,dmg,label}    ", { id = name, dmg = dmg, label = st.label })
+  -- P10: не отравляет ли матчинг поле label
+  probe("P10", "P10 {id,dmg,label}        ", { id = name, dmg = dmg, label = st.label })
 
+  -- ==== ВЕРДИКТ ====
+  addLine("")
+  addLine("=== ВЕРДИКТ ===")
+  if probeResults.P1 == "ОБЪЕКТ" then
+    addLine("Стек матчится обычным фингерпринтом {id,dmg}.")
+    addLine("Магазин может выдать такой сток через exportItem.")
+  else
+    addLine("Стек НЕ матчится НИ ОДНИМ фингерпринтом (непрозрачный NBT).")
+    addLine("Конвертер драйвера читает из таблицы только id/dmg,")
+    addLine("NBT задать невозможно => exportItem такой стек не выдаст.")
+    if #vorder > 1 then
+      addLine("В МЭ одновременно лежат " .. #vorder .. " NBT-варианта этого предмета.")
+    end
+    addLine("Варианты лечения: держать сток без тега, ручная выдача,")
+    addLine("либо починка на уровне драйвера/модпака.")
+  end
+
+  -- ==== ТЕСТ exportItem (ДВИГАЕТ предметы! только с сундуком) ====
+  if EXPORT_TEST_SIDE ~= "" then
+    addLine("")
+    addLine("=== ТЕСТ exportItem (сторона " .. EXPORT_TEST_SIDE .. ", по 1 шт) ===")
+    addLine("!! ПРЕДМЕТЫ УХОДЯТ В СУНДУК — верните их в МЭ вручную !!")
+    local function probeExport(label, fp, extra)
+      local oke, res = pcall(function()
+        if extra ~= nil then
+          return me.exportItem(fp, EXPORT_TEST_SIDE, 1, extra)
+        end
+        return me.exportItem(fp, EXPORT_TEST_SIDE, 1)
+      end)
+      local got = 0
+      if oke then
+        if type(res) == "number" then got = res
+        elseif type(res) == "boolean" and res then got = 1
+        elseif type(res) == "table" then got = res.count or res.amount or res.size or 0 end
+        addLine(label .. " : выдано " .. got)
+      else
+        addLine(label .. " : ошибка: " .. tostring(res):sub(1, 50))
+      end
+    end
+    probeExport("E1 {id,dmg}          ", { id = name, dmg = dmg })
+    local fpE2 = {}
+    for k, v in pairs(st) do fpE2[k] = v end
+    fpE2.id = name
+    probeExport("E2 round-trip + id   ", fpE2)
+    if st.charge ~= nil then
+      probeExport("E3 {id,dmg,charge}   ", { id = name, dmg = dmg, charge = st.charge })
+    end
+    probeExport("E4 {id,dmg} +4-й арг ", { id = name, dmg = dmg }, true)
+    addLine("Проверьте сундук после теста.")
+  end
 
   detailPage = 1
   view = "detail"
@@ -364,7 +437,7 @@ local function draw()
   if page < 1 then page = 1 end
 
   gpu.setForeground(0x55FFFF)
-  gpu.set(1, 1, "ME DEBUG SCANNER v1.2 | режим: " .. (mode == "group" and "ГРУППЫ" or "СЫРЫЕ СТЕКИ"))
+  gpu.set(1, 1, "ME DEBUG SCANNER v1.5 | режим: " .. (mode == "group" and "ГРУППЫ" or "СЫРЫЕ СТЕКИ"))
   gpu.setForeground(0xFFFF55)
   gpu.set(w - 26, 1, string.format("стр %d/%d из %d", page, totalPages, #list))
   gpu.setForeground(0x888888)
@@ -393,11 +466,11 @@ local function draw()
         i, unicode.sub(g.name, 1, 42), g.damage, g.total, g.stacks)
     else
       local st = list[i]
-      local name = st.name or st.label or st.id or "?"
+      local sname = st.name or st.label or st.id or "?"
       local sdmg = tonumber(st.damage or st.dmg or st.meta or st.metadata or 0) or 0
       local size = tonumber(st.size or st.qty or st.count or 0) or 0
       line = string.format("[%4d] %-42s dmg=%-5d size=%d",
-        i, unicode.sub(tostring(name), 1, 42), sdmg, size)
+        i, unicode.sub(tostring(sname), 1, 42), sdmg, size)
     end
     if i == cursor then
       gpu.setForeground(0x000000)
@@ -501,8 +574,8 @@ while running do
       doAction(hit)
     elseif view == "list" and ty >= 4 and ty < 4 + perPage then
       local idx = (page - 1) * perPage + (ty - 3)
-      local list = getDisplayList()
-      if idx >= 1 and idx <= #list then
+      local l2 = getDisplayList()
+      if idx >= 1 and idx <= #l2 then
         if cursor == idx then
           openDetail(idx)
         else
