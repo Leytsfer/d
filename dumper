@@ -1,0 +1,349 @@
+-- ============================================================
+-- ME DEBUG SCANNER v1.0
+-- Отладчик МЭ: сканирует сеть и выводит ВСЕ данные предметов
+--
+-- Управление:
+--   ↑ / ↓  или  PgUp / PgDn  — листать список
+--   Enter                    — открыть все поля выбранного предмета
+--   R                        — пересканировать МЭ
+--   G                        — переключить режим (группы / сырые стеки)
+--   Esc / Q                  — выход (из деталей — возврат к списку)
+--   Клик мышью               — выбрать / открыть детали
+-- ============================================================
+
+local component = require("component")
+local event = require("event")
+local serialization = require("serialization")
+local unicode = require("unicode")
+local computer = require("computer")
+
+local gpu = component.gpu
+if not gpu then
+  print("GPU не найден")
+  return
+end
+
+-- Максимальное разрешение экрана
+local w, h = gpu.getResolution()
+local mw, mh = gpu.maxResolution()
+if w < mw or h < mh then
+  gpu.setResolution(mw, mh)
+  w, h = gpu.getResolution()
+end
+
+-- ============================================================
+-- НАСТРОЙКА АДРЕСА (если у вас несколько интерфейсов)
+-- Оставьте пустым "" для автопоиска первого доступного
+-- ============================================================
+local ME_INTERFACE_ADDRESS = ""
+
+local me = nil
+if ME_INTERFACE_ADDRESS ~= "" then
+  local okType, t = pcall(component.type, ME_INTERFACE_ADDRESS)
+  if okType and t == "me_interface" then
+    me = component.proxy(ME_INTERFACE_ADDRESS)
+  end
+else
+  for addr in component.list("me_interface") do
+    me = component.proxy(addr)
+    break
+  end
+end
+
+if not me then
+  gpu.setForeground(0xFF5555)
+  print("[ОШИБКА] Компонент me_interface не найден.")
+  print("Подключите ME Interface к компьютеру и запустите снова.")
+  return
+end
+
+-- ===== Состояние =====
+local items = {}        -- сгруппированные по имя+damage
+local rawItems = {}     -- сырые стеки из МЭ
+local mode = "group"    -- group | raw
+local view = "list"     -- list | detail
+local page = 1
+local cursor = 1
+local statusMsg = "Нажмите R для сканирования МЭ"
+local perPage = math.max(1, h - 6)
+
+local detailLines = {}
+local detailPage = 1
+local detailTitle = ""
+
+-- ===== Утилиты =====
+local function wrap(str, width)
+  local out = {}
+  str = tostring(str or "")
+  while unicode.len(str) > width do
+    table.insert(out, unicode.sub(str, 1, width))
+    str = unicode.sub(str, width + 1)
+  end
+  table.insert(out, str)
+  return out
+end
+
+local function stackLines(st)
+  local lines = {}
+  if type(st) ~= "table" then
+    return { tostring(st) }
+  end
+  local keys = {}
+  for k in pairs(st) do table.insert(keys, k) end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  for _, k in ipairs(keys) do
+    local v = st[k]
+    local valStr
+    if type(v) == "table" then
+      local ok, s = pcall(serialization.serialize, v)
+      valStr = ok and s or "[таблица]"
+    else
+      valStr = tostring(v)
+    end
+    table.insert(lines, string.format("%s = %s", tostring(k), valStr))
+  end
+  return lines
+end
+
+local function getDisplayList()
+  if mode == "raw" then return rawItems end
+  return items
+end
+
+-- ===== Отрисовка списка =====
+local function draw()
+  gpu.setBackground(0x000000)
+  gpu.setForeground(0xFFFFFF)
+  gpu.fill(1, 1, w, h, " ")
+
+  gpu.setForeground(0x55FFFF)
+  gpu.set(1, 1, "ME DEBUG SCANNER v1.0 | режим: " .. (mode == "group" and "ГРУППЫ" or "СЫРЫЕ СТЕКИ"))
+  gpu.setForeground(0x888888)
+  gpu.set(1, 2, "[R]скан [G]режим [Enter]детали [Q]выход | ↑↓ PgUp/PgDn листать")
+
+  local list = getDisplayList()
+  local totalPages = math.max(1, math.ceil(#list / perPage))
+  if page > totalPages then page = totalPages end
+  if page < 1 then page = 1 end
+
+  gpu.setForeground(0xFFFF55)
+  gpu.set(w - 26, 1, string.format("стр %d/%d из %d", page, totalPages, #list))
+
+  local startIdx = (page - 1) * perPage + 1
+  local y = 4
+  for i = startIdx, math.min(startIdx + perPage - 1, #list) do
+    local line
+    if mode == "group" then
+      local g = list[i]
+      line = string.format("[%4d] %-42s dmg=%-5d кол-во=%-10d стеков=%d",
+        i, unicode.sub(g.name, 1, 42), g.damage, g.total, g.stacks)
+    else
+      local st = list[i]
+      local name = st.name or st.label or st.id or "?"
+      local dmg = tonumber(st.damage or st.dmg or st.meta or st.metadata or 0) or 0
+      local size = tonumber(st.size or st.qty or st.count or 0) or 0
+      line = string.format("[%4d] %-42s dmg=%-5d size=%d",
+        i, unicode.sub(tostring(name), 1, 42), dmg, size)
+    end
+    if i == cursor then
+      gpu.setForeground(0x000000)
+      gpu.setBackground(0x55FFFF)
+    else
+      gpu.setForeground(0xFFFFFF)
+      gpu.setBackground(0x000000)
+    end
+    gpu.set(1, y, unicode.sub(line, 1, w))
+    y = y + 1
+  end
+  gpu.setBackground(0x000000)
+
+  gpu.setForeground(0x55FF55)
+  gpu.set(1, h, unicode.sub(statusMsg, 1, w))
+end
+
+-- ===== Сканирование =====
+local function scan()
+  statusMsg = "Сканирование МЭ..."
+  draw()
+  items = {}
+  rawItems = {}
+  local t0 = computer.uptime()
+  local ok, list = pcall(function() return me.getItemsInNetwork() end)
+  if not ok or type(list) ~= "table" then
+    statusMsg = "Ошибка сканирования: " .. tostring(list)
+    return
+  end
+  rawItems = list
+  local groups = {}
+  local order = {}
+  for _, st in ipairs(list) do
+    local name = st.name or st.label or st.id or "?"
+    local dmg = st.damage or st.dmg or st.meta or st.metadata or 0
+    dmg = tonumber(dmg) or 0
+    local size = st.size or st.qty or st.count or 0
+    local key = name .. ":" .. dmg
+    if not groups[key] then
+      groups[key] = { name = name, damage = dmg, total = 0, stacks = 0, sample = st }
+      table.insert(order, key)
+    end
+    groups[key].total = groups[key].total + (tonumber(size) or 0)
+    groups[key].stacks = groups[key].stacks + 1
+  end
+  table.sort(order, function(a, b)
+    if groups[a].name ~= groups[b].name then return groups[a].name < groups[b].name end
+    return groups[a].damage < groups[b].damage
+  end)
+  items = {}
+  for _, k in ipairs(order) do table.insert(items, groups[k]) end
+  local dt = computer.uptime() - t0
+  statusMsg = string.format("Найдено: %d уникальных, %d стеков (%.2f сек)", #items, #rawItems, dt)
+  page = 1
+  cursor = 1
+end
+
+-- ===== Детальный просмотр =====
+local function openDetail(idx)
+  local list = getDisplayList()
+  if idx < 1 or idx > #list then return end
+  local st, title
+  if mode == "group" then
+    st = list[idx].sample
+    title = list[idx].name .. "  (damage=" .. list[idx].damage .. ")"
+  else
+    st = list[idx]
+    title = tostring(st.name or st.label or st.id or "?") ..
+      "  (damage=" .. tostring(st.damage or st.dmg or st.meta or st.metadata or 0) .. ")"
+  end
+  detailTitle = title
+  detailLines = {}
+  table.insert(detailLines, "=== ВСЕ ПОЛЯ ПРЕДМЕТА (из сети) ===")
+  table.insert(detailLines, "")
+  for _, l in ipairs(stackLines(st)) do
+    for _, wl in ipairs(wrap(l, w - 2)) do
+      table.insert(detailLines, wl)
+    end
+  end
+  -- Попытка получить расширенные детали через getItemDetail
+  if me.getItemDetail then
+    table.insert(detailLines, "")
+    table.insert(detailLines, "=== getItemDetail() ===")
+    local name = st.name or st.label or st.id
+    local dmg = tonumber(st.damage or st.dmg or st.meta or st.metadata or 0) or 0
+    local ok2, det = pcall(function() return me.getItemDetail({ name = name, dmg = dmg }) end)
+    if ok2 and det then
+      if det.basic then
+        table.insert(detailLines, "--- basic ---")
+        for _, l in ipairs(stackLines(det.basic)) do
+          for _, wl in ipairs(wrap(l, w - 2)) do table.insert(detailLines, wl) end
+        end
+      else
+        for _, l in ipairs(stackLines(det)) do
+          for _, wl in ipairs(wrap(l, w - 2)) do table.insert(detailLines, wl) end
+        end
+      end
+    else
+      table.insert(detailLines, "getItemDetail не ответил: " .. tostring(det))
+    end
+  end
+  detailPage = 1
+  view = "detail"
+end
+
+local function drawDetail()
+  gpu.setBackground(0x000000)
+  gpu.setForeground(0xFFFFFF)
+  gpu.fill(1, 1, w, h, " ")
+
+  gpu.setForeground(0x55FFFF)
+  gpu.set(1, 1, "ДЕТАЛИ: " .. unicode.sub(detailTitle, 1, w - 30))
+  gpu.setForeground(0x888888)
+  gpu.set(1, 2, "[Esc/Q]назад | ↑↓ PgUp/PgDn листать")
+
+  local totalPages = math.max(1, math.ceil(#detailLines / perPage))
+  if detailPage > totalPages then detailPage = totalPages end
+  if detailPage < 1 then detailPage = 1 end
+  gpu.setForeground(0xFFFF55)
+  gpu.set(w - 20, 1, string.format("стр %d/%d", detailPage, totalPages))
+
+  local startIdx = (detailPage - 1) * perPage + 1
+  local y = 4
+  gpu.setForeground(0xFFFFFF)
+  for i = startIdx, math.min(startIdx + perPage - 1, #detailLines) do
+    gpu.set(1, y, unicode.sub(detailLines[i], 1, w))
+    y = y + 1
+  end
+end
+
+-- ===== Навигация =====
+local function moveCursor(delta)
+  local list = getDisplayList()
+  if #list == 0 then return end
+  cursor = cursor + delta
+  if cursor < 1 then cursor = 1 end
+  if cursor > #list then cursor = #list end
+  local totalPages = math.max(1, math.ceil(#list / perPage))
+  page = math.floor((cursor - 1) / perPage) + 1
+  if page < 1 then page = 1 end
+  if page > totalPages then page = totalPages end
+end
+
+-- ===== Главный цикл =====
+local running = true
+while running do
+  if view == "list" then draw() else drawDetail() end
+  local ev = { event.pull() }
+  local evType = ev[1]
+
+  if evType == "key_down" then
+    local code = ev[3]
+    if view == "list" then
+      if code == 200 then moveCursor(-1) end          -- Up
+      if code == 208 then moveCursor(1) end           -- Down
+      if code == 201 then moveCursor(-perPage) end    -- PageUp
+      if code == 209 then moveCursor(perPage) end     -- PageDown
+      if code == 13 then openDetail(cursor) end       -- Enter
+      if code == 19 then scan() end                   -- R
+      if code == 34 then                              -- G
+        mode = (mode == "group") and "raw" or "group"
+        page = 1; cursor = 1
+        statusMsg = "Режим: " .. (mode == "group" and "ГРУППЫ" or "СЫРЫЕ СТЕКИ")
+      end
+      if code == 16 then running = false end          -- Q
+      if code == 1 then running = false end           -- Esc
+    else
+      if code == 200 then detailPage = detailPage - 1 end
+      if code == 208 then detailPage = detailPage + 1 end
+      if code == 201 then detailPage = detailPage - perPage end
+      if code == 209 then detailPage = detailPage + perPage end
+      if code == 1 or code == 16 or code == 13 then view = "list" end  -- назад
+    end
+  elseif evType == "scroll" then
+    local dir = -(ev[5] or 0)
+    if view == "list" then
+      moveCursor(dir * 3)
+    else
+      detailPage = detailPage - dir * 3
+    end
+  elseif evType == "touch" then
+    if view == "list" then
+      local ty = ev[4]
+      if ty >= 4 and ty < 4 + perPage then
+        local idx = (page - 1) * perPage + (ty - 3)
+        local list = getDisplayList()
+        if idx >= 1 and idx <= #list then
+          if cursor == idx then
+            openDetail(idx)
+          else
+            cursor = idx
+          end
+        end
+      end
+    end
+  end
+end
+
+-- Очистка при выходе
+gpu.setBackground(0x000000)
+gpu.setForeground(0xFFFFFF)
+gpu.fill(1, 1, w, h, " ")
+print("ME Debug Scanner завершён.")
