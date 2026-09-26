@@ -1,8 +1,13 @@
 -- ============================================================
--- ME DEBUG SCANNER v1.1
+-- ME DEBUG SCANNER v1.2
+-- Отладчик МЭ: сканирует сеть и выводит ВСЕ данные предметов.
+--
 -- Управление МЫШЬЮ: кнопки на 3-й строке, клик по строке списка,
 -- колесо мыши для листания.
 -- Управление КЛАВИАТУРОЙ: R G Enter Q Esc, стрелки, PgUp/PgDn.
+--
+-- v1.2: исправлен getItemDetail (драйвер требует поле 'id'),
+--       добавлен блок «ТЕСТ СОВПАДЕНИЯ МАГАЗИНА» и типы ключевых полей.
 -- ============================================================
 
 local component = require("component")
@@ -20,7 +25,7 @@ if w < mw or h < mh then
 end
 
 -- ============================================================
--- АДРЕС ИНТЕРФЕЙСА (пусто = автопоиск первого)
+-- АДРЕС ИНТЕРФЕЙСА (пусто = автопоиск первого доступного)
 -- ============================================================
 local ME_INTERFACE_ADDRESS = ""
 
@@ -67,6 +72,12 @@ local function wrap(str, width)
   end
   table.insert(out, str)
   return out
+end
+
+local function addLine(text)
+  for _, wl in ipairs(wrap(text, w - 2)) do
+    table.insert(detailLines, wl)
+  end
 end
 
 local function stackLines(st)
@@ -134,7 +145,7 @@ local function scan()
 end
 
 -- ===== Детальный просмотр =====
-  local function openDetail(idx)
+local function openDetail(idx)
   local list = getDisplayList()
   if idx < 1 or idx > #list then return end
   local st, title
@@ -148,72 +159,141 @@ end
   end
   detailTitle = title
   detailLines = {}
-  table.insert(detailLines, "=== ВСЕ ПОЛЯ ПРЕДМЕТА (из сети) ===")
-  table.insert(detailLines, "")
-  for _, l in ipairs(stackLines(st)) do
-    for _, wl in ipairs(wrap(l, w - 2)) do
-      table.insert(detailLines, wl)
-    end
-  end
-  -- Расширенные детали через getItemDetail (драйвер GTNH требует поле 'id', не 'name')
+
+  addLine("=== ВСЕ ПОЛЯ ПРЕДМЕТА (из сети) ===")
+  addLine("")
+  addLine("ключевые поля:")
+  addLine("  name   = " .. tostring(st.name) .. "  (" .. type(st.name) .. ")")
+  addLine("  damage = " .. tostring(st.damage) .. "  (" .. type(st.damage) .. ")")
+  addLine("  size   = " .. tostring(st.size) .. "  (" .. type(st.size) .. ")")
+  addLine("  hasTag = " .. tostring(st.hasTag) .. "  (" .. type(st.hasTag) .. ")")
+  addLine("  maxDamage = " .. tostring(st.maxDamage) .. "  | maxSize = " .. tostring(st.maxSize))
+  addLine("")
+  for _, l in ipairs(stackLines(st)) do addLine(l) end
+
+  local name = st.name or st.label or st.id
+  local dmg = tonumber(st.damage or st.dmg or st.meta or st.metadata or 0) or 0
+
+  -- ==== getItemDetail(): драйвер GTNH требует поле 'id', а не 'name' ====
   if me.getItemDetail then
-    table.insert(detailLines, "")
-    table.insert(detailLines, "=== getItemDetail() ===")
-    local name = st.name or st.label or st.id
-    local dmg = tonumber(st.damage or st.dmg or st.meta or st.metadata or 0) or 0
+    addLine("")
+    addLine("=== getItemDetail() ===")
     local ok2, det = pcall(function() return me.getItemDetail({ id = name, dmg = dmg }) end)
     if not ok2 or not det then
       local ok3, det3 = pcall(function() return me.getItemDetail({ id = name, damage = dmg }) end)
       if ok3 and det3 then ok2, det = true, det3 end
     end
     if ok2 and det then
-      if det.basic then
-        table.insert(detailLines, "--- basic ---")
-        for _, l in ipairs(stackLines(det.basic)) do
-          for _, wl in ipairs(wrap(l, w - 2)) do table.insert(detailLines, wl) end
-        end
+      local okb, basic = pcall(function()
+        if type(det.basic) == "function" then return det.basic() end
+        return det.basic
+      end)
+      if okb and type(basic) == "table" then
+        addLine("--- basic ---")
+        for _, l in ipairs(stackLines(basic)) do addLine(l) end
       else
-        for _, l in ipairs(stackLines(det)) do
-          for _, wl in ipairs(wrap(l, w - 2)) do table.insert(detailLines, wl) end
-        end
+        for _, l in ipairs(stackLines(det)) do addLine(l) end
       end
     else
-      table.insert(detailLines, "getItemDetail не ответил: " .. tostring(det))
+      addLine("getItemDetail не ответил: " .. tostring(det))
     end
   end
 
   -- ==== ТЕСТ СОВПАДЕНИЯ МАГАЗИНА ====
-  -- Проверяем, какие имена полей драйвер МЭ реально понимает в фильтре/отпечатке.
-  -- Именно от этого зависят наличие на витрине и успех exportItem при покупке.
-  do
-    local name2 = st.name or st.label or st.id
-    local dmg2 = tonumber(st.damage or st.dmg or st.meta or st.metadata or 0) or 0
-    table.insert(detailLines, "")
-    table.insert(detailLines, "=== ТЕСТ СОВПАДЕНИЯ МАГАЗИНА ===")
-    table.insert(detailLines, "Ключ витрины: " .. name2 .. ":" .. tostring(dmg2))
-    table.insert(detailLines, "Фингерпринт покупки: { id = " .. name2 .. ", dmg = " .. tostring(dmg2) .. " }")
-    local function tryFilter(label, filter)
-      local okf, list = pcall(function() return me.getItemsInNetwork(filter) end)
-      if not okf then
-        table.insert(detailLines, label .. " : ошибка драйвера: " .. tostring(list):sub(1, 70))
-        return
-      end
-      local total, withDmg = 0, 0
-      if type(list) == "table" then
-        for _, it in ipairs(list) do
-          total = total + (tonumber(it.size) or 0)
-          if (tonumber(it.damage) or 0) == dmg2 then
-            withDmg = withDmg + (tonumber(it.size) or 0)
-          end
-        end
-      end
-      table.insert(detailLines, label .. " : всего " .. total .. ", из них damage=" .. tostring(dmg2) .. ": " .. withDmg)
+  addLine("")
+  addLine("=== ТЕСТ СОВПАДЕНИЯ МАГАЗИНА ===")
+  addLine("Ключ витрины: " .. tostring(name) .. ":" .. tostring(dmg))
+  addLine("Фингерпринт покупки: { id = " .. tostring(name) .. ", dmg = " .. tostring(dmg) .. " }")
+
+  local function sumFilter(label, filter)
+    local okf, flist = pcall(function() return me.getItemsInNetwork(filter) end)
+    if not okf then
+      addLine(label .. " : ошибка драйвера: " .. tostring(flist):sub(1, 60))
+      return
     end
-    tryFilter("{id, dmg}     ", { id = name2, dmg = dmg2 })
-    tryFilter("{id, damage}  ", { id = name2, damage = dmg2 })
-    tryFilter("{id}          ", { id = name2 })
-    tryFilter("{name, damage}", { name = name2, damage = dmg2 })
+    local total, withDmg = 0, 0
+    if type(flist) == "table" then
+      for _, it in ipairs(flist) do
+        local sz = tonumber(it.size) or 0
+        total = total + sz
+        if (tonumber(it.damage) or 0) == dmg then withDmg = withDmg + sz end
+      end
+    end
+    addLine(label .. " : всего " .. total .. ", из них damage=" .. tostring(dmg) .. ": " .. withDmg)
   end
+
+  sumFilter("{id, dmg}    ", { id = name, dmg = dmg })
+  sumFilter("{id, damage} ", { id = name, damage = dmg })
+  sumFilter("{id}         ", { id = name })
+  sumFilter("{name, dmg}  ", { name = name, dmg = dmg })
+
+  if me.getItemDetail then
+    local okd, d1 = pcall(function() return me.getItemDetail({ id = name, dmg = dmg }) end)
+    if okd and d1 then
+      local okb, b = pcall(function()
+        if type(d1.basic) == "function" then return d1.basic() end
+        return d1.basic
+      end)
+      if okb and type(b) == "table" then
+        addLine("getItemDetail{id,dmg}.basic: qty=" .. tostring(b.qty or b.size or 0))
+      else
+        addLine("getItemDetail{id,dmg}: ответил, но basic недоступен")
+      end
+    else
+      addLine("getItemDetail{id,dmg}: ошибка " .. tostring(d1):sub(1, 50))
+    end
+  end
+
+  if st.hasTag == true then
+    addLine("!! ПРЕДМЕТ ИМЕЕТ NBT-ТЕГ (hasTag=true)")
+    addLine("!! Если покупка падает с «Не удалось выдать предмет» —")
+    addLine("!! вероятно, exportItem не матчит стек с тегом по фингерпринту без тега.")
+  end
+
+
+  -- ==== ОРАКУЛ v1.4: какой фингерпринт драйвер узнаёт (безопасно, предметы не двигаются) ====
+  addLine("")
+  addLine("=== ОРАКУЛ: варианты фингерпринта ===")
+  local function probe(label, fp)
+    local okd, det = pcall(function() return me.getItemDetail(fp) end)
+    local res
+    if not okd then res = "ошибка"
+    elseif not det then res = "nil"
+    else res = "ОБЪЕКТ" end
+    addLine(label .. " : " .. res)
+  end
+
+  -- P1: базовый (как сейчас шлёт магазин)
+  probe("P1 {id,dmg}               ", { id = name, dmg = dmg })
+
+  -- P2: round-trip — полная копия стека из сети
+  local rt = {}
+  for k, v in pairs(st) do rt[k] = v end
+  probe("P2 round-trip все поля    ", rt)
+
+  -- P3: round-trip без количества
+  local rt2 = {}
+  for k, v in pairs(st) do
+    if k ~= "size" and k ~= "qty" and k ~= "count" then rt2[k] = v end
+  end
+  probe("P3 round-trip без size    ", rt2)
+
+  -- P4: с зарядом из стека
+  if st.charge ~= nil then
+    probe("P4 {id,dmg,charge}        ", { id = name, dmg = dmg, charge = st.charge })
+  end
+
+  -- P5: флаг hasTag
+  probe("P5 {id,dmg,hasTag=true}   ", { id = name, dmg = dmg, hasTag = true })
+
+  -- P6/P7: кандидаты ключа nbt
+  probe("P6 {id,dmg,nbt=''}        ", { id = name, dmg = dmg, nbt = "" })
+  probe("P7 {id,dmg,nbt=empty-b64} ", { id = name, dmg = dmg, nbt = "CgAAAA==" })
+
+
+  detailPage = 1
+  view = "detail"
+end
 
 -- ===== Навигация =====
 local function moveCursor(delta)
@@ -256,13 +336,12 @@ local function draw()
   if page < 1 then page = 1 end
 
   gpu.setForeground(0x55FFFF)
-  gpu.set(1, 1, "ME DEBUG SCANNER v1.1 | режим: " .. (mode == "group" and "ГРУППЫ" or "СЫРЫЕ СТЕКИ"))
+  gpu.set(1, 1, "ME DEBUG SCANNER v1.2 | режим: " .. (mode == "group" and "ГРУППЫ" or "СЫРЫЕ СТЕКИ"))
   gpu.setForeground(0xFFFF55)
   gpu.set(w - 26, 1, string.format("стр %d/%d из %d", page, totalPages, #list))
   gpu.setForeground(0x888888)
   gpu.set(1, 2, "Мышь: кнопки ниже, клик по строке, колесо | Клавиши: R G Enter Q Esc, стрелки")
 
-  -- Кликабельные кнопки на 3-й строке
   local function bar(x, bw, label, action, color)
     gpu.setBackground(0x1a1a1a)
     gpu.setForeground(color)
@@ -287,10 +366,10 @@ local function draw()
     else
       local st = list[i]
       local name = st.name or st.label or st.id or "?"
-      local dmg = tonumber(st.damage or st.dmg or st.meta or st.metadata or 0) or 0
+      local sdmg = tonumber(st.damage or st.dmg or st.meta or st.metadata or 0) or 0
       local size = tonumber(st.size or st.qty or st.count or 0) or 0
       line = string.format("[%4d] %-42s dmg=%-5d size=%d",
-        i, unicode.sub(tostring(name), 1, 42), dmg, size)
+        i, unicode.sub(tostring(name), 1, 42), sdmg, size)
     end
     if i == cursor then
       gpu.setForeground(0x000000)
@@ -355,10 +434,10 @@ while running do
   local evType = ev[1]
 
   if evType == "key_down" then
-    local char = ev[3] or 0     -- СИМВОЛ
-    local code = ev[4] or 0     -- КОД клавиши
+    local char = ev[3] or 0
+    local code = ev[4] or 0
     local lc = char
-    if lc >= 65 and lc <= 90 then lc = lc + 32 end  -- буквы в нижний регистр
+    if lc >= 65 and lc <= 90 then lc = lc + 32 end
 
     if view == "list" then
       if code == 200 then moveCursor(-1)
